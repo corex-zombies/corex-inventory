@@ -6,6 +6,45 @@ const CONFIG = {
     weightSegments: 20
 };
 
+/**
+ * Dynamic icons (optional) in shared/items.lua:
+ *   iconMetadataKey = 'model'   -- reads item.metadata.model
+ * If iconFilenamePattern is omitted → uses "%s.png" (e.g. bmx.png, cruiser.png).
+ * Or set iconFilenamePattern = 'prefix_%s.png' for a custom prefix.
+ */
+function getItemImageSrc(item, itemDef) {
+    const def = itemDef || {};
+    const defaultFromDef = def.image ? 'images/' + def.image : null;
+
+    if (!item || !item.name) {
+        return defaultFromDef || 'images/default.png';
+    }
+
+    const meta = item.metadata || {};
+    const metaKey = def.iconMetadataKey;
+    let pattern = def.iconFilenamePattern;
+
+    if (typeof metaKey === 'string' && metaKey.length > 0) {
+        if (typeof pattern !== 'string' || pattern.indexOf('%s') === -1) {
+            pattern = '%s.png';
+        }
+        let raw = meta[metaKey] != null ? String(meta[metaKey]) : '';
+        raw = raw.trim().toLowerCase();
+        const safe = raw.replace(/[^a-z0-9_-]/g, '');
+        if (safe) {
+            const filename = pattern.replace('%s', safe);
+            return 'images/' + filename;
+        }
+    }
+
+    if (defaultFromDef) {
+        return defaultFromDef;
+    }
+
+    const nm = String(item.name).toLowerCase();
+    return 'images/' + nm + '.png';
+}
+
 let inventoryData = null;
 let groundItems = [];
 let itemsData = {};
@@ -367,9 +406,10 @@ function syncHotbarWithInventory(hotkeyMapping) {
 
             const img = document.createElement('img');
             img.className = 'hotbar-item-image';
-            img.src = `images/${itemDef.image || item.name.toLowerCase() + '.png'}`;
+            img.src = getItemImageSrc(item, itemDef);
             img.alt = itemDef.label || item.name;
             img.onerror = function () {
+                this.onerror = null;
                 this.src = 'images/default.png';
             };
 
@@ -438,18 +478,18 @@ function createShopCard(item) {
     if (!itemDef) {
         itemDef = Object.values(itemsData).find(d => d.label === item.name || d.name === item.name) || { label: item.name, description: 'No description available.', size: {w:1, h:1} };
     }
-    
+
     const rarity = itemDef.rarity || 'common';
     const rarityLabel = rarity.charAt(0).toUpperCase() + rarity.slice(1);
-    
+
     const el = document.createElement('div');
     el.className = `shop-card rarity-border-${rarity}`;
-    
+
     const cat = itemDef.category || 'Item';
     const itemLabel = itemDef.label || item.name;
     const itemDesc = itemDef.description ? itemDef.description : 'A valuable survival item.';
     const imageName = itemDef.image || item.name.toLowerCase() + '.png';
-    
+
     el.innerHTML = `
         <div class="shop-card-content">
             <div class="shop-card-image rarity-bg-${rarity}">
@@ -569,7 +609,7 @@ function createItemElement(item, source, quickslotNum) {
         fragment.appendChild(priceEl);
     }
     const img = document.createElement('img');
-    img.src = 'images/' + (itemDef.image || 'default.png');
+    img.src = getItemImageSrc(item, itemDef);
     img.alt = itemDef.label || '';
     img.onerror = function() { this.onerror = null; this.src = 'images/default.png'; };
     fragment.appendChild(img);
@@ -785,6 +825,41 @@ function hideContextMenu() {
     contextItemElement = null;
 }
 
+contextMenu.querySelectorAll('.menu-option').forEach((option) => {
+    option.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (!selectedItem) return;
+
+        const action = option.dataset.action;
+        if (action === 'use') {
+            fetch(`https://${GetParentResourceName()}/useItem`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    name: selectedItem.name,
+                    slot: selectedItem.slot
+                })
+            }).catch(() => {});
+            hideContextMenu();
+        } else if (action === 'drop') {
+            fetch(`https://${GetParentResourceName()}/dropItem`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    name: selectedItem.name,
+                    count: selectedItem.count || 1,
+                    slot: selectedItem.slot,
+                    x: selectedItem.x || 1,
+                    y: selectedItem.y || 1
+                })
+            }).catch(() => {});
+            hideContextMenu();
+        } else if (action === 'give') {
+            playersSubmenu.classList.toggle('hidden');
+        }
+    });
+});
+
 function updateNearbyPlayers(players) {
     nearbyPlayers = players || [];
     renderPlayersList();
@@ -977,8 +1052,13 @@ function renderHotbarSlot(slot, item, itemDef) {
 
     const img = document.createElement('img');
     img.className = 'hotbar-item-image';
-    img.src = `images/${itemDef.image || 'default.png'}`;
+    const row = item.data || item;
+    img.src = getItemImageSrc(row, itemDef);
     img.alt = itemDef.label || item.name;
+    img.onerror = function () {
+        this.onerror = null;
+        this.src = 'images/default.png';
+    };
 
     const count = document.createElement('span');
     count.className = 'hotbar-item-count';
@@ -1106,7 +1186,7 @@ function openLootContainer(data) {
         el.dataset.revealed = 'false';
         el.style.pointerEvents = 'none';
 
-        const imgSrc = itemDef.image ? `images/${itemDef.image}` : (item.image || 'images/default.png');
+        const imgSrc = getItemImageSrc(item, itemDef);
         const totalWeight = ((itemDef.weight || 0) * (item.count || 1)).toFixed(2);
 
         el.innerHTML = '';

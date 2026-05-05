@@ -29,8 +29,21 @@ Config.GiveDistance = 5.0
 Config.PropSyncInterval = 10000
 Config.MarkerCacheInterval = 100
 
+-- Portable vehicle system (ox_target pickup -> inventory item -> deploy)
+Config.PortableVehicles = {
+    Enabled = true,
+    ItemName = 'portable_vehicle',
+    DefaultPortable = true,
+    PickupDistance = 4.5,
+    RegisterDistance = 18.0,
+    DeployTimeout = 16000,
+    SpawnDistance = 3.8,
+    AutoEnterOnDeploy = true,
+    ReplacePreviousActive = false
+}
 
--- WEAPON RECOIL SYSTEM 
+
+-- WEAPON RECOIL SYSTEM
 
 Config.Recoil = {
     Enabled = true,
@@ -46,7 +59,7 @@ Config.Recoil = {
         GlobalMultiplier = 2.0,
         RecoverySpeed = 0.05
     },
-    
+
     Patterns = {
         pistol = {
             vertical = 0.22,
@@ -79,7 +92,7 @@ Config.Recoil = {
             recovery = 0.89
         }
     },
-    
+
     AttachmentModifiers = {
         grip = 0.65,
         suppressor = 0.80,

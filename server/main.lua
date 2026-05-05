@@ -7,7 +7,14 @@
 local Inventories = {}
 local DroppedItems = {}
 local PendingVehiclePurchases = {}
+--- Deployed rental bikes: finalize plate/model before ox_target pickup works
+local PendingBikeRegistration = {}
+--- If folding back to item fails mid-deploy, restore this metadata to inventory
+local PendingBikeRefund = {}
+local DeployRefundToken = {}
 local dropIdCounter = 0
+--- Anti-spam for bicycle pickup (no TrySetBusy: players often stay "busy" from other flows).
+local LastRentalBikePickupAttempt = {}
 local slotCounter = 0
 
 local function ShallowCopy(tbl)
@@ -36,6 +43,15 @@ local function GenerateRentalPlate()
     return ('CX%04d'):format(math.random(0, 9999))
 end
 
+local function NormalizePlate(plate)
+    if type(plate) ~= 'string' then return '' end
+    return (plate:gsub('^%s+', ''):gsub('%s+$', ''))
+end
+
+local function PlatesMatch(a, b)
+    return NormalizePlate(a):upper() == NormalizePlate(b):upper()
+end
+
 local function GetVehicleCatalog(catalogId)
     local ok, catalog = pcall(function()
         return exports['corex-core']:GetVehicleCatalog(catalogId)
@@ -48,6 +64,87 @@ local function GetVehicleDefinition(catalogId, model)
         return exports['corex-core']:GetVehicleDefinition(catalogId, model)
     end)
     return ok and vehicle or nil
+end
+
+local function IsBikeRentalModel(modelKey)
+    local key = NormalizeVehicleKey(modelKey)
+    if not key then return false end
+    return GetVehicleDefinition('bike_rental', key) ~= nil
+end
+
+---Server-safe: GetVehicleClass is client-only; whitelist hashes from bike_rental catalog.
+local function IsBikeRentalModelHash(modelHash)
+    if type(modelHash) ~= 'number' then return false end
+    local catalog = GetVehicleCatalog('bike_rental')
+    if not catalog or type(catalog.vehicles) ~= 'table' then return false end
+    for _, vehicle in ipairs(catalog.vehicles) do
+        local m = vehicle.model
+        if type(m) == 'string' and GetHashKey(m) == modelHash then
+            return true
+        end
+    end
+    return false
+end
+
+local function GetPortableVehicleItemName(catalog, vehicleDef)
+    if vehicleDef and type(vehicleDef.inventoryItem) == 'string' and vehicleDef.inventoryItem ~= '' then
+        return vehicleDef.inventoryItem
+    end
+
+    if catalog and type(catalog.inventoryItem) == 'string' and catalog.inventoryItem ~= '' then
+        return catalog.inventoryItem
+    end
+
+    return (Config.PortableVehicles and Config.PortableVehicles.ItemName) or 'portable_vehicle'
+end
+
+local function IsPortableVehicleDefinition(catalog, vehicleDef)
+    if not vehicleDef then return false end
+    if Config.PortableVehicles and Config.PortableVehicles.Enabled == false then return false end
+    if vehicleDef.portable == false then return false end
+    if catalog and catalog.portable == false then return false end
+
+    local defaultPortable = true
+    if Config.PortableVehicles and Config.PortableVehicles.DefaultPortable ~= nil then
+        defaultPortable = Config.PortableVehicles.DefaultPortable == true
+    end
+
+    return vehicleDef.portable == true or (catalog and catalog.portable == true) or defaultPortable
+end
+
+local function GetPortableVehicleDefinition(catalogId, model)
+    local catalogKey = NormalizeVehicleKey(catalogId or 'bike_rental')
+    local modelKey = NormalizeVehicleKey(model)
+    if not catalogKey or not modelKey then return nil, nil, nil end
+
+    local catalog = GetVehicleCatalog(catalogKey)
+    local vehicleDef = GetVehicleDefinition(catalogKey, modelKey)
+    if not IsPortableVehicleDefinition(catalog, vehicleDef) then
+        return nil, nil, nil
+    end
+
+    return catalog, vehicleDef, catalogKey
+end
+
+local function IsPortableVehicleModel(catalogId, model)
+    local catalog, vehicleDef = GetPortableVehicleDefinition(catalogId, model)
+    return catalog ~= nil and vehicleDef ~= nil
+end
+
+local function IsPortableVehicleModelHash(catalogId, modelHash)
+    if type(modelHash) ~= 'number' then return false end
+
+    local catalog = GetVehicleCatalog(catalogId or 'bike_rental')
+    if not catalog or type(catalog.vehicles) ~= 'table' then return false end
+
+    for _, vehicle in ipairs(catalog.vehicles) do
+        local m = vehicle.model
+        if type(m) == 'string' and GetHashKey(m) == modelHash and IsPortableVehicleDefinition(catalog, vehicle) then
+            return true, NormalizeVehicleKey(m), vehicle, catalog
+        end
+    end
+
+    return false
 end
 
 Items = Items or {}
@@ -729,6 +826,57 @@ local function RemoveItem(src, itemName, count)
     return false
 end
 
+---Remove a single inventory stack by slot id (for unique metadata items).
+---@return boolean success
+---@return table|nil removedItem
+local function RemoveInventoryItemAtSlot(src, slotId)
+    if slotId == nil then return false end
+    local wanted = tostring(slotId)
+    local inv = Inventories[src]
+    if not inv then return false end
+
+    for index, item in ipairs(inv.items) do
+        local itemSlot = item.slot ~= nil and tostring(item.slot) or nil
+        if itemSlot == wanted then
+            local data = GetItemData(item.name)
+            if data then inv.weight = inv.weight - (data.weight * (item.count or 1)) end
+            table.remove(inv.items, index)
+            SaveInventory(src)
+            TriggerClientEvent('corex-inventory:client:update', src, inv)
+            return true, item
+        end
+    end
+
+    return false
+end
+
+local function RefundPendingBikeDeploy(src, message)
+    local refund = PendingBikeRefund[src]
+    if not refund then return end
+
+    local itemName = 'rental_bicycle'
+    local meta = refund
+    if type(refund) == 'table' and type(refund.itemName) == 'string' and type(refund.metadata) == 'table' then
+        itemName = refund.itemName
+        meta = refund.metadata
+    end
+
+    AddItem(src, itemName, 1, ShallowCopy(meta))
+    PendingBikeRefund[src] = nil
+    DeployRefundToken[src] = nil
+    if message and type(message) == 'string' then
+        TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, message, 'error')
+    end
+end
+
+AddEventHandler('playerDropped', function()
+    local src = source
+    PendingBikeRegistration[src] = nil
+    PendingBikeRefund[src] = nil
+    DeployRefundToken[src] = nil
+    LastRentalBikePickupAttempt[src] = nil
+end)
+
 RegisterNetEvent('corex-inventory:server:load', function()
     LoadInventory(source)
 end)
@@ -1387,7 +1535,7 @@ RegisterNetEvent('corex-inventory:server:purchaseVehicleShopItem', function(shop
     if PendingVehiclePurchases[src] then
         local player = GetPlayer(src)
         local cash = player and player.money and player.money.cash or 0
-        TriggerClientEvent('corex-inventory:client:vehiclePurchaseResult', src, false, 'Wait for the current bike to finish deploying.', cash)
+        TriggerClientEvent('corex-inventory:client:vehiclePurchaseResult', src, false, 'Wait for the current vehicle to finish deploying.', cash)
         return
     end
 
@@ -1435,12 +1583,16 @@ RegisterNetEvent('corex-inventory:server:purchaseVehicleShopItem', function(shop
         return
     end
 
+    local plate = GenerateRentalPlate()
     PendingVehiclePurchases[src] = {
         shopName = shopName,
+        catalogId = NormalizeVehicleKey(catalogId),
         model = NormalizeVehicleKey(model),
         label = vehicleDef.label or model,
         price = price,
         currency = currency,
+        itemName = GetPortableVehicleItemName(catalog, vehicleDef),
+        plate = plate,
         expiresAt = GetGameTimer() + 15000
     }
 
@@ -1448,7 +1600,7 @@ RegisterNetEvent('corex-inventory:server:purchaseVehicleShopItem', function(shop
         shopName = shopName,
         catalogId = catalogId,
         model = vehicleDef.model or model,
-        plate = GenerateRentalPlate(),
+        plate = plate,
         spawnPoint = shop.spawnPoint or (shop.npc and shop.npc.coords)
     })
 end)
@@ -1461,6 +1613,14 @@ RegisterNetEvent('corex-inventory:server:vehicleSpawnSucceeded', function(shopNa
     if pending.shopName ~= shopName or pending.model ~= NormalizeVehicleKey(model) then
         return
     end
+
+    PendingBikeRegistration[src] = {
+        plate = pending.plate,
+        catalogId = pending.catalogId or 'bike_rental',
+        model = pending.model,
+        label = pending.label,
+        itemName = pending.itemName or ((Config.PortableVehicles and Config.PortableVehicles.ItemName) or 'portable_vehicle')
+    }
 
     PendingVehiclePurchases[src] = nil
 
@@ -1496,6 +1656,347 @@ RegisterNetEvent('corex-inventory:server:vehicleSpawnFailed', function(shopName,
     end
 
     TriggerClientEvent('corex-inventory:client:vehiclePurchaseResult', src, false, refundMessage, newMoney)
+end)
+
+RegisterNetEvent('corex-inventory:server:finalizePortableVehicle', function(netId)
+    local src = source
+    netId = tonumber(netId)
+    if not netId or netId == 0 then return end
+
+    local entity = NetworkGetEntityFromNetworkId(netId)
+    if not entity or entity == 0 or not DoesEntityExist(entity) then return end
+    if GetEntityType(entity) ~= 2 then return end
+
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return end
+
+    local pcoords = GetEntityCoords(ped)
+    local vcoords = GetEntityCoords(entity)
+    if not pcoords or not vcoords then return end
+
+    local maxDistance = (Config.PortableVehicles and Config.PortableVehicles.RegisterDistance) or 18.0
+    if #(pcoords - vcoords) > maxDistance then return end
+
+    local player = GetPlayer(src)
+    if not player then return end
+
+    local pending = PendingBikeRegistration[src]
+    if not pending then return end
+
+    local catalogId = NormalizeVehicleKey(pending.catalogId or 'bike_rental')
+    local isAllowed, modelFromHash = IsPortableVehicleModelHash(catalogId, GetEntityModel(entity))
+    if not isAllowed then return end
+
+    local plateText = NormalizePlate(GetVehicleNumberPlateText(entity))
+    if not PlatesMatch(pending.plate, plateText) then return end
+
+    local modelKey = NormalizeVehicleKey(pending.model or modelFromHash)
+    if not modelKey or GetEntityModel(entity) ~= GetHashKey(modelKey) then return end
+
+    local ent = Entity(entity)
+    local state = ent.state
+    if state.corexPortableVehicleOwner then return end
+
+    state:set('corexPortableVehicleOwner', player.identifier, true)
+    state:set('corexPortableVehiclePlate', plateText, true)
+    state:set('corexPortableVehicleCatalog', catalogId, true)
+    state:set('corexPortableVehicleModel', modelKey, true)
+    state:set('corexPortableVehicleLabel', pending.label or modelKey, true)
+    state:set('corexPortableVehicleItem', pending.itemName or ((Config.PortableVehicles and Config.PortableVehicles.ItemName) or 'portable_vehicle'), true)
+
+    if catalogId == 'bike_rental' then
+        state:set('corexRentalBikeOwner', player.identifier, true)
+        state:set('corexRentalBikePlate', plateText, true)
+        state:set('corexRentalBikeModel', modelKey, true)
+    end
+
+    PendingBikeRegistration[src] = nil
+    PendingBikeRefund[src] = nil
+    DeployRefundToken[src] = nil
+end)
+
+RegisterNetEvent('corex-inventory:server:pickupPortableVehicle', function(netId)
+    local src = source
+
+    local now = GetGameTimer()
+    local lastAttempt = LastRentalBikePickupAttempt[src]
+    if lastAttempt and (now - lastAttempt) < 400 then
+        return
+    end
+    LastRentalBikePickupAttempt[src] = now
+
+    netId = tonumber(netId)
+    if not netId or netId == 0 then return end
+
+    local entity = NetworkGetEntityFromNetworkId(netId)
+    if not entity or entity == 0 or not DoesEntityExist(entity) then return end
+    if GetEntityType(entity) ~= 2 then return end
+
+    local ped = GetPlayerPed(src)
+    local pcoords = GetEntityCoords(ped)
+    local vcoords = GetEntityCoords(entity)
+    if not pcoords or not vcoords then return end
+
+    local pickupDistance = (Config.PortableVehicles and Config.PortableVehicles.PickupDistance) or 4.5
+    if #(pcoords - vcoords) > pickupDistance then
+        TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, 'You are too far from the vehicle.', 'error')
+        return
+    end
+
+    local player = GetPlayer(src)
+    if not player then return end
+
+    local state = Entity(entity).state
+    local owner = state.corexPortableVehicleOwner or state.corexRentalBikeOwner
+    local plate = state.corexPortableVehiclePlate or state.corexRentalBikePlate or NormalizePlate(GetVehicleNumberPlateText(entity))
+    local catalogId = NormalizeVehicleKey(state.corexPortableVehicleCatalog or 'bike_rental')
+    local model = NormalizeVehicleKey(state.corexPortableVehicleModel or state.corexRentalBikeModel)
+    local label = state.corexPortableVehicleLabel or model
+    local itemName = state.corexPortableVehicleItem or ((catalogId == 'bike_rental') and 'rental_bicycle' or ((Config.PortableVehicles and Config.PortableVehicles.ItemName) or 'portable_vehicle'))
+
+    if type(owner) ~= 'string' or owner == '' then
+        TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, 'This vehicle cannot be picked up.', 'error')
+        return
+    end
+
+    if owner ~= player.identifier then
+        TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, 'You can only pick up your own vehicle.', 'error')
+        return
+    end
+
+    if not model or not IsPortableVehicleModel(catalogId, model) then
+        TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, 'This vehicle cannot be picked up.', 'error')
+        return
+    end
+
+    local meta = {
+        owner = owner,
+        catalogId = catalogId,
+        plate = NormalizePlate(plate),
+        model = model,
+        label = label,
+        itemName = itemName
+    }
+
+    local ok, err = AddItem(src, itemName, 1, meta)
+    if not ok then
+        TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, type(err) == 'string' and err or 'Not enough inventory space.', 'error')
+        return
+    end
+
+    TriggerClientEvent('corex-inventory:client:deleteVehicleByNetId', -1, netId)
+end)
+
+local function DeployPortableVehicleFromItem(src, slotId, requestedItemName)
+    local inv = Inventories[src]
+    if not inv then return end
+
+    local itemName = requestedItemName
+    if type(itemName) ~= 'string' or itemName == '' then
+        itemName = (Config.PortableVehicles and Config.PortableVehicles.ItemName) or 'portable_vehicle'
+    end
+
+    local item = FindInventoryItem(inv, itemName, slotId)
+    if not item and itemName ~= 'rental_bicycle' then
+        item = FindInventoryItem(inv, 'rental_bicycle', slotId)
+    end
+    if not item then return end
+
+    itemName = item.name
+    local meta = EnsureItemMetadata(item.name, item.metadata)
+    local owner = meta.owner
+    local catalogId = NormalizeVehicleKey(meta.catalogId or ((itemName == 'rental_bicycle') and 'bike_rental' or 'bike_rental'))
+    local plate = NormalizePlate(meta.plate)
+    local model = NormalizeVehicleKey(meta.model)
+    local label = meta.label or model
+
+    local player = GetPlayer(src)
+    if not player then return end
+
+    if type(owner) ~= 'string' or owner ~= player.identifier then
+        TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, 'You cannot use this vehicle.', 'error')
+        return
+    end
+
+    if not model or not IsPortableVehicleModel(catalogId, model) or plate == '' then
+        TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, 'This vehicle item is invalid.', 'error')
+        return
+    end
+
+    local removed = RemoveInventoryItemAtSlot(src, item.slot)
+    if not removed then return end
+
+    PendingBikeRegistration[src] = {
+        plate = plate,
+        catalogId = catalogId,
+        model = model,
+        label = label,
+        itemName = itemName
+    }
+    PendingBikeRefund[src] = {
+        itemName = itemName,
+        metadata = {
+            owner = owner,
+            catalogId = catalogId,
+            plate = plate,
+            model = model,
+            label = label,
+            itemName = itemName
+        }
+    }
+
+    local token = math.random(1, 2147483647)
+    DeployRefundToken[src] = token
+
+    CreateThread(function()
+        Wait((Config.PortableVehicles and Config.PortableVehicles.DeployTimeout) or 16000)
+        if DeployRefundToken[src] == token then
+            RefundPendingBikeDeploy(src, 'Vehicle deployment timed out; item was returned to your inventory.')
+        end
+    end)
+
+    TriggerClientEvent('corex-inventory:client:spawnPortableVehicleFromItem', src, {
+        catalogId = catalogId,
+        model = model,
+        plate = plate,
+        label = label,
+        spawnDistance = Config.PortableVehicles and Config.PortableVehicles.SpawnDistance
+    })
+end
+
+RegisterNetEvent('corex-inventory:server:deployPortableVehicleFromItem', function(slotId, requestedItemName)
+    DeployPortableVehicleFromItem(source, slotId, requestedItemName)
+end)
+
+RegisterNetEvent('corex-inventory:server:portableVehicleDeployAborted', function()
+    RefundPendingBikeDeploy(source, 'Could not deploy vehicle.')
+end)
+
+RegisterNetEvent('corex-inventory:server:finalizeRentalBike', function(netId)
+    local src = source
+    netId = tonumber(netId)
+    if not netId or netId == 0 then return end
+
+    local entity = NetworkGetEntityFromNetworkId(netId)
+    if not entity or entity == 0 or not DoesEntityExist(entity) then return end
+    if GetEntityType(entity) ~= 2 then return end
+    if not IsBikeRentalModelHash(GetEntityModel(entity)) then return end
+
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return end
+
+    local pcoords = GetEntityCoords(ped)
+    local vcoords = GetEntityCoords(entity)
+    if not pcoords or not vcoords then return end
+    if #(pcoords - vcoords) > 14.0 then return end
+
+    local player = GetPlayer(src)
+    if not player then return end
+
+    local pending = PendingBikeRegistration[src]
+    if not pending then return end
+
+    local plateText = NormalizePlate(GetVehicleNumberPlateText(entity))
+    if not PlatesMatch(pending.plate, plateText) then return end
+
+    local modelHash = GetEntityModel(entity)
+    if modelHash ~= GetHashKey(pending.model) then return end
+
+    local ent = Entity(entity)
+    local state = ent.state
+    if state.corexRentalBikeOwner then return end
+
+    state:set('corexRentalBikeOwner', player.identifier, true)
+    state:set('corexRentalBikePlate', plateText, true)
+    state:set('corexRentalBikeModel', pending.model, true)
+
+    PendingBikeRegistration[src] = nil
+    PendingBikeRefund[src] = nil
+    DeployRefundToken[src] = nil
+end)
+
+RegisterNetEvent('corex-inventory:server:pickupRentalBike', function(netId)
+    local src = source
+
+    local now = GetGameTimer()
+    local lastAttempt = LastRentalBikePickupAttempt[src]
+    if lastAttempt and (now - lastAttempt) < 400 then
+        return
+    end
+    LastRentalBikePickupAttempt[src] = now
+
+    netId = tonumber(netId)
+    if not netId or netId == 0 then
+        return
+    end
+
+    local entity = NetworkGetEntityFromNetworkId(netId)
+    if not entity or entity == 0 or not DoesEntityExist(entity) then
+        return
+    end
+
+    if GetEntityType(entity) ~= 2 or not IsBikeRentalModelHash(GetEntityModel(entity)) then
+        return
+    end
+
+    local ped = GetPlayerPed(src)
+    local pcoords = GetEntityCoords(ped)
+    local vcoords = GetEntityCoords(entity)
+    if not pcoords or not vcoords then
+        return
+    end
+
+    if #(pcoords - vcoords) > 4.5 then
+        TriggerClientEvent('corex-inventory:client:rentalBikeNotify', src, 'You are too far from the bicycle.', 'error')
+        return
+    end
+
+    local player = GetPlayer(src)
+    if not player then
+        return
+    end
+
+    local state = Entity(entity).state
+    local owner = state.corexRentalBikeOwner
+    local plate = state.corexRentalBikePlate or NormalizePlate(GetVehicleNumberPlateText(entity))
+    local model = state.corexRentalBikeModel
+
+    if type(owner) ~= 'string' or owner == '' then
+        TriggerClientEvent('corex-inventory:client:rentalBikeNotify', src, 'This bicycle cannot be picked up.', 'error')
+        return
+    end
+
+    if type(model) ~= 'string' or not IsBikeRentalModel(model) then
+        TriggerClientEvent('corex-inventory:client:rentalBikeNotify', src, 'This bicycle cannot be picked up.', 'error')
+        return
+    end
+
+    if owner ~= player.identifier then
+        TriggerClientEvent('corex-inventory:client:rentalBikeNotify', src, 'You can only pick up your own bicycle.', 'error')
+        return
+    end
+
+    local meta = {
+        owner = owner,
+        plate = NormalizePlate(plate),
+        model = NormalizeVehicleKey(model),
+    }
+
+    local ok, err = AddItem(src, 'rental_bicycle', 1, meta)
+    if not ok then
+        TriggerClientEvent('corex-inventory:client:rentalBikeNotify', src, type(err) == 'string' and err or 'Not enough inventory space.', 'error')
+        return
+    end
+
+    TriggerClientEvent('corex-inventory:client:deleteVehicleByNetId', -1, netId)
+end)
+
+RegisterNetEvent('corex-inventory:server:deployRentalBikeFromItem', function(slotId)
+    DeployPortableVehicleFromItem(source, slotId, 'rental_bicycle')
+end)
+
+RegisterNetEvent('corex-inventory:server:rentalBikeDeployAborted', function()
+    RefundPendingBikeDeploy(source, 'Could not deploy vehicle.')
 end)
 
 CreateThread(function()

@@ -20,6 +20,7 @@ server_scripts {
 
 client_scripts {
     'client/main.lua',
+    'client/rental_bicycle.lua',
     'client/weapons.lua',
     'client/shops.lua'
 }
@@ -36,5 +37,7 @@ files {
 }
 
 dependencies {
-    'corex-core'
+    'corex-core',
+    'ox_lib',
+    'ox_target'
 }

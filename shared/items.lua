@@ -1,6 +1,6 @@
 --[[
     COREX Inventory - Items Definition
-    
+
     Template:
     ['item_name'] = {
         label = 'Display Name',
@@ -9,7 +9,9 @@
         stackable = true,
         maxStack = 10,
         usable = true,
-        image = 'item_name.png',
+        image = 'item_name.png',       -- fallback if dynamic icon not used
+        iconMetadataKey = 'variant',   -- optional: PNG = <metadata value>.png in html/images/
+        iconFilenamePattern = 'foo_%s.png', -- optional; omit for plain "%s.png"
         prop = 'prop_name',
         rarity = 'common'           -- common/uncommon/rare/epic/legendary/mythic
     }
@@ -490,6 +492,28 @@ Items = {
         usable = false,
         image = 'duct_tape.png',
         rarity = 'uncommon'
+    },
+
+    ['rental_bicycle'] = {
+        label = 'Bicycle',
+        weight = 8.0,
+        size = {w = 2, h = 2},
+        stackable = false,
+        usable = true,
+        image = 'default.png',
+        iconMetadataKey = 'model',
+        rarity = 'common'
+    },
+
+    ['portable_vehicle'] = {
+        label = 'Vehicle',
+        weight = 12.0,
+        size = {w = 2, h = 2},
+        stackable = false,
+        usable = true,
+        image = 'default.png',
+        iconMetadataKey = 'model',
+        rarity = 'rare'
     },
 
     -- =====================

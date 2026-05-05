@@ -411,6 +411,12 @@ RegisterNetEvent('corex-inventory:client:useItem', function(itemName, itemData)
         return
     end
 
+    if itemName == 'portable_vehicle' or itemName == 'rental_bicycle' then
+        pcall(CloseInventory)
+        TriggerServerEvent('corex-inventory:server:deployPortableVehicleFromItem', (itemData or {}).slot, itemName)
+        return
+    end
+
     local ammoDef = Ammo[itemName]
     if ammoDef then
         TriggerEvent('corex-inventory:internal:addAmmo', itemName, itemData or {})
@@ -1024,7 +1030,8 @@ RegisterNetEvent('corex-inventory:client:spawnPurchasedVehicle', function(payloa
         SetVehicleNumberPlateText(vehicle, payload.plate)
     end
 
-    if activeRentalVehicle and DoesEntityExist(activeRentalVehicle) and activeRentalVehicle ~= vehicle then
+    local replaceActive = Config.PortableVehicles and Config.PortableVehicles.ReplacePreviousActive == true
+    if replaceActive and activeRentalVehicle and DoesEntityExist(activeRentalVehicle) and activeRentalVehicle ~= vehicle then
         SetEntityAsMissionEntity(activeRentalVehicle, true, true)
         DeleteVehicle(activeRentalVehicle)
     end
@@ -1038,10 +1045,28 @@ RegisterNetEvent('corex-inventory:client:spawnPurchasedVehicle', function(payloa
     SetModelAsNoLongerNeeded(hash)
     TriggerServerEvent('corex-inventory:server:vehicleSpawnSucceeded', shopName, payload.model)
     Corex.Functions.Notify(label .. ' is ready.', 'success', 2500)
+
+    TriggerEvent('corex-inventory:internal:registerPortableVehicleNet', vehicle)
 end)
 
 exports('OpenShop', OpenShop)
 exports('CloseShop', CloseShop)
+
+exports('SetActiveRentalVehicle', function(vehicle)
+    local replaceActive = Config.PortableVehicles and Config.PortableVehicles.ReplacePreviousActive == true
+    if replaceActive and activeRentalVehicle and activeRentalVehicle ~= vehicle and DoesEntityExist(activeRentalVehicle) then
+        SetEntityAsMissionEntity(activeRentalVehicle, true, true)
+        DeleteVehicle(activeRentalVehicle)
+    end
+    activeRentalVehicle = vehicle
+end)
+
+exports('ClearActiveRentalVehicleIfMatches', function(entity)
+    if not entity or entity == 0 then return end
+    if activeRentalVehicle == entity then
+        activeRentalVehicle = nil
+    end
+end)
 
 -- ========== LOOT CONTAINER MODE ==========
 

@@ -19,7 +19,7 @@ Before updating or installing this inventory, install **ox_lib** from:
 
 For **ox_target**, use the COREX-compatible build that supports this framework. Join the COREX Discord channel below and download the posted `ox_target` version from there:
 
-[<https://discord.com/channels/1450075262749376558/1499425731095167057>](https://github.com/iamxiann/ox_target)
+<https://github.com/iamxiann/ox_target>
 
 The normal/public `ox_target` may not include the COREX framework adapter, so portable vehicle pickup can fail if the wrong build is used.
 

@@ -1377,6 +1377,11 @@ exports('GetItemsCatalog', function() return Items or {} end)
 exports('GetWeaponsCatalog', function() return Weapons or {} end)
 exports('GetAmmoCatalog', function() return Ammo or {} end)
 exports('GetFullCatalog', GetAllItemsData)
+-- Grid dimensions live in Config; expose them so sibling resources (e.g.
+-- corex-admin's inventory editor) can render the correct slot count
+-- without duplicating the constant.
+exports('GetGridWidth',  function() return Config and Config.GridWidth  or 8  end)
+exports('GetGridHeight', function() return Config and Config.GridHeight or 10 end)
 exports('AddItem', AddItem)
 exports('RemoveItem', RemoveItem)
 exports('GetInventory', function(src) return Inventories[src] end)

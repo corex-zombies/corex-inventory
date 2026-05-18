@@ -58,6 +58,10 @@ let dragOffsetX = 0;
 let dragOffsetY = 0;
 let dragPreview = null;
 let isActionPending = false;
+let isBagMode = false;
+let bagInventoryData = null;
+let bagGridCols = 4;
+let bagGridRows = 3;
 
 function nuiRequestId() {
     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -72,6 +76,8 @@ const playerGrid = document.getElementById('player-grid');
 const dropGrid = document.getElementById('drop-grid');
 const contextMenu = document.getElementById('context-menu');
 const weightSegmentsContainer = document.getElementById('weight-segments');
+const bagWeightSegmentsContainer = document.getElementById('bag-weight-segments');
+const bagWeightText = document.getElementById('bag-weight-text');
 
 function initializeUI() {
     renderSlots(playerGrid, CONFIG.gridCols, CONFIG.gridRows);
@@ -728,8 +734,19 @@ function handleDragMove(e) {
     } else if (dragSource === 'ground' && playerSlot) {
         const valid = !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
         showDragPreviewAt(playerSlot, draggedItem, valid, false);
+    } else if (dragSource === 'bag' && playerSlot) {
+        const valid = !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
+        showDragPreviewAt(playerSlot, draggedItem, valid, false);
     } else if (dragSource === 'player' && dropSlot) {
-        showDragPreviewAt(dropSlot, draggedItem, true, true);
+        if (isBagMode) {
+            const valid = !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || []);
+            showDragPreviewAt(dropSlot, draggedItem, valid, false);
+        } else {
+            showDragPreviewAt(dropSlot, draggedItem, true, true);
+        }
+    } else if (dragSource === 'bag' && dropSlot) {
+        const valid = !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || [], draggedItem.slot);
+        showDragPreviewAt(dropSlot, draggedItem, valid, false);
     } else {
         hideDragPreview();
     }
@@ -757,17 +774,43 @@ function handleDragEnd(e) {
                 })
             }).catch(() => {});
         }
+    } else if (dragSource === 'bag' && playerSlot) {
+        const valid = !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
+        if (valid) {
+            fetch(`https://${GetParentResourceName()}/moveFromBag`, {
+                method: 'POST',
+                body: JSON.stringify({ bagSlot: draggedItem.slot, playerX: playerSlot.x, playerY: playerSlot.y })
+            }).catch(() => {});
+        }
+    } else if (dragSource === 'bag' && dropSlot) {
+        const valid = !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || [], draggedItem.slot);
+        if (valid) {
+            fetch(`https://${GetParentResourceName()}/moveBagItem`, {
+                method: 'POST',
+                body: JSON.stringify({ bagSlot: draggedItem.slot, x: dropSlot.x, y: dropSlot.y })
+            }).catch(() => {});
+        }
     } else if (dragSource === 'player' && dropSlot) {
-        fetch(`https://${GetParentResourceName()}/dropItem`, {
-            method: 'POST',
-            body: JSON.stringify({
-                name: draggedItem.name,
-                count: draggedItem.count || 1,
-                slot: draggedItem.slot,
-                x: dropSlot.x,
-                y: dropSlot.y
-            })
-        }).catch(() => {});
+        if (isBagMode) {
+            const valid = !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || []);
+            if (valid) {
+                fetch(`https://${GetParentResourceName()}/moveToBag`, {
+                    method: 'POST',
+                    body: JSON.stringify({ playerSlot: draggedItem.slot, bagX: dropSlot.x, bagY: dropSlot.y })
+                }).catch(() => {});
+            }
+        } else {
+            fetch(`https://${GetParentResourceName()}/dropItem`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    name: draggedItem.name,
+                    count: draggedItem.count || 1,
+                    slot: draggedItem.slot,
+                    x: dropSlot.x,
+                    y: dropSlot.y
+                })
+            }).catch(() => {});
+        }
     } else if (dragSource === 'ground' && playerSlot) {
         const valid = !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
         if (valid) {
@@ -795,7 +838,21 @@ function showContextMenu(e, item, source, itemEl) {
     e.preventDefault();
     e.stopPropagation();
 
-    if (source !== 'player') return;
+    if (source !== 'player' && source !== 'bag') return;
+
+    const useOption  = contextMenu.querySelector('[data-action="use"]');
+    const dropOption = contextMenu.querySelector('[data-action="drop"]');
+    const giveOption = contextMenu.querySelector('[data-action="give"]');
+
+    if (source === 'bag') {
+        if (useOption)  { useOption.querySelector('span').textContent  = 'Take'; useOption.style.display  = ''; }
+        if (dropOption) { dropOption.style.display = 'none'; }
+        if (giveOption) { giveOption.style.display = 'none'; }
+    } else {
+        if (useOption)  { useOption.querySelector('span').textContent  = 'Use';  useOption.style.display  = ''; }
+        if (dropOption) { dropOption.style.display = ''; }
+        if (giveOption) { giveOption.style.display = ''; }
+    }
 
     selectedItem = { ...item, source };
     contextItemElement = itemEl;
@@ -833,7 +890,13 @@ contextMenu.querySelectorAll('.menu-option').forEach((option) => {
         if (!selectedItem) return;
 
         const action = option.dataset.action;
-        if (action === 'use') {
+        if (action === 'use' && selectedItem.source === 'bag') {
+            fetch(`https://${GetParentResourceName()}/moveFromBag`, {
+                method: 'POST',
+                body: JSON.stringify({ bagSlot: selectedItem.slot, playerX: null, playerY: null })
+            }).catch(() => {});
+            hideContextMenu();
+        } else if (action === 'use') {
             fetch(`https://${GetParentResourceName()}/useItem`, {
                 method: 'POST',
                 body: JSON.stringify({
@@ -955,11 +1018,18 @@ window.addEventListener('message', (event) => {
         case 'closeLootContainer':
             closeLootContainer();
             break;
+        case 'openBag':
+            openBag(data.bag);
+            break;
+        case 'syncBag':
+            syncBag(data);
+            break;
     }
 });
 
 function forceClose() {
     if (isContainerMode) closeLootContainer();
+    if (isBagMode) closeBagMode();
     container.classList.add('hidden');
     if (typeof window.forceCloseVehicleShop === 'function') {
         window.forceCloseVehicleShop();
@@ -1116,6 +1186,149 @@ function GetParentResourceName() {
 
 setupHotbarDragAndDrop();
 initializeUI();
+
+/* ========== BAG MODE ========== */
+
+function renderBagWeightSegments() {
+    bagWeightSegmentsContainer.innerHTML = '';
+
+    // Scale segment count to available header space
+    // header reserved: icon(42) + title(65) + weight-text(90) + paddings(28) ≈ 225px
+    // each segment = 6px + 2px gap = 8px
+    const gridWidth  = bagGridCols * (CONFIG.cellSize + CONFIG.gapSize) - CONFIG.gapSize;
+    const panelWidth = Math.max(gridWidth + 20, 260);
+    const segCount   = Math.max(4, Math.floor((panelWidth - 225) / 8));
+
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < segCount; i++) {
+        const seg = document.createElement('div');
+        seg.className = 'weight-segment';
+        frag.appendChild(seg);
+    }
+    bagWeightSegmentsContainer.appendChild(frag);
+}
+
+function updateBagWeightBar(current, max) {
+    const segments = bagWeightSegmentsContainer.querySelectorAll('.weight-segment');
+    const percentage = Math.min((current / (max || 1)) * 100, 100);
+    const filled = Math.round((percentage / 100) * segments.length);
+
+    segments.forEach((seg, i) => {
+        seg.classList.remove('filled', 'warning', 'danger');
+        if (i < filled) {
+            if (percentage >= 90)      seg.classList.add('danger');
+            else if (percentage >= 70) seg.classList.add('warning');
+            else                       seg.classList.add('filled');
+        }
+    });
+
+    document.getElementById('bag-current-weight').textContent = Math.round(current * 100) / 100;
+    document.getElementById('bag-max-weight').textContent = Math.round(max);
+}
+
+function checkBagCollision(x, y, w, h, items, excludeSlot) {
+    if (x < 1 || y < 1 || x + w - 1 > bagGridCols || y + h - 1 > bagGridRows) return true;
+    for (const item of items) {
+        if (item.slot === excludeSlot) continue;
+        const def = itemsData[item.name] || { size: { w: 1, h: 1 } };
+        const iW = def.size?.w || 1;
+        const iH = def.size?.h || 1;
+        const overlapsX = !((x + w - 1) < item.x || x > (item.x + iW - 1));
+        const overlapsY = !((y + h - 1) < item.y || y > (item.y + iH - 1));
+        if (overlapsX && overlapsY) return true;
+    }
+    return false;
+}
+
+function renderBagItems() {
+    dropGrid.querySelectorAll('.item').forEach(el => el.remove());
+    if (!bagInventoryData || !bagInventoryData.items) return;
+
+    const savedCols = CONFIG.gridCols;
+    const savedRows = CONFIG.gridRows;
+    CONFIG.gridCols = bagGridCols;
+    CONFIG.gridRows = bagGridRows;
+
+    const frag = document.createDocumentFragment();
+    bagInventoryData.items.forEach(item => {
+        frag.appendChild(createItemElement(item, 'bag'));
+    });
+    dropGrid.appendChild(frag);
+
+    CONFIG.gridCols = savedCols;
+    CONFIG.gridRows = savedRows;
+}
+
+function openBag(data) {
+    if (!data) return;
+    isBagMode = true;
+    bagInventoryData = data;
+    bagGridCols = data.gridW || 4;
+    bagGridRows = data.gridH || 3;
+
+    const dropTitle = document.getElementById('drop-title');
+    const dropHint  = document.getElementById('drop-hint');
+    const dropIcon  = document.getElementById('drop-icon');
+    const shopMoney = document.getElementById('shop-money');
+    const dropPanel = document.querySelector('.drop-panel');
+
+    dropTitle.textContent = 'Big Bag';
+    dropIcon.className    = 'fa-solid fa-bag-shopping hex-inner-icon';
+    dropHint.classList.add('hidden');
+    shopMoney.classList.add('hidden');
+    bagWeightSegmentsContainer.classList.remove('hidden');
+    bagWeightText.classList.remove('hidden');
+
+    // Size the panel to the bag grid, with a floor so the header always fits
+    // header reserved ≈ 220px (icon + title + weight-text + paddings)
+    // Each extra col adds (cellSize + gapSize) = 70px
+    const gridWidth  = bagGridCols * (CONFIG.cellSize + CONFIG.gapSize) - CONFIG.gapSize;
+    const panelWidth = Math.max(gridWidth + 20, 260);
+    if (dropPanel) {
+        dropPanel.style.alignSelf = 'flex-start';
+        dropPanel.style.width     = panelWidth + 'px';
+        dropPanel.style.minWidth  = 'unset';
+    }
+
+    renderSlots(dropGrid, bagGridCols, bagGridRows);
+    renderBagWeightSegments();
+    updateBagWeightBar(data.weight || 0, data.maxWeight || 20);
+    renderBagItems();
+}
+
+function syncBag(data) {
+    if (!isBagMode || !bagInventoryData) return;
+    bagInventoryData.items     = data.items     || [];
+    bagInventoryData.weight    = data.weight    || 0;
+    bagInventoryData.maxWeight = data.maxWeight || 20;
+    updateBagWeightBar(bagInventoryData.weight, bagInventoryData.maxWeight);
+    renderBagItems();
+}
+
+function closeBagMode() {
+    isBagMode = false;
+    bagInventoryData = null;
+
+    const dropTitle = document.getElementById('drop-title');
+    const dropHint  = document.getElementById('drop-hint');
+    const dropIcon  = document.getElementById('drop-icon');
+
+    dropTitle.textContent = 'Ground';
+    dropIcon.className    = 'fa-solid fa-arrow-down hex-inner-icon';
+    dropHint.classList.remove('hidden');
+    bagWeightSegmentsContainer.classList.add('hidden');
+    bagWeightText.classList.add('hidden');
+
+    const dropPanel = document.querySelector('.drop-panel');
+    if (dropPanel) {
+        dropPanel.style.alignSelf = '';
+        dropPanel.style.width     = '';
+        dropPanel.style.minWidth  = '';
+    }
+
+    renderSlots(dropGrid, CONFIG.gridCols, CONFIG.gridRows);
+    renderGroundItems();
+}
 
 /* ========== LOOT CONTAINER MODE ========== */
 

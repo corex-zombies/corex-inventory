@@ -555,4 +555,24 @@ Items = {
         image = 'default.png',
         rarity = 'rare'
     },
+
+    -- =====================
+    -- BAGS
+    -- =====================
+
+    -- isBag = true       → triggers the bag sub-inventory when used
+    -- bagGrid            → inner grid dimensions {w, h}
+    -- bagMaxWeight       → max total weight the bag can hold (independent of player weight)
+    ['big_bag'] = {
+        label = 'Big Bag',
+        weight = 0.5,
+        size = {w = 2, h = 2},
+        stackable = false,
+        usable = true,
+        image = 'big_bag.png',
+        rarity = 'uncommon',
+        isBag = true,
+        bagGrid = {w = 7, h = 7},
+        bagMaxWeight = 20.0
+    },
 }

@@ -16,6 +16,8 @@ local dropIdCounter = 0
 --- Anti-spam for bicycle pickup (no TrySetBusy: players often stay "busy" from other flows).
 local LastRentalBikePickupAttempt = {}
 local slotCounter = 0
+local BagInventories = {}  -- [bagId] = {items, weight, maxWeight, gridW, gridH, isDirty}
+local BagViewers     = {}  -- [bagId] = src (who is currently viewing this bag)
 
 local function ShallowCopy(tbl)
     if type(tbl) ~= 'table' then
@@ -1439,6 +1441,403 @@ RegisterCommand('removeitem', function(src, args)
     local count = tonumber(args[2]) or 1
     if item then RemoveItem(src, item, count) end
 end, true)
+
+-- =============================================================
+-- BAG SYSTEM
+-- =============================================================
+
+local function GenerateBagId()
+    return ('bag_%d_%d'):format(GetGameTimer(), math.random(100000, 999999))
+end
+
+local function IsSpotFreeInBag(bagInv, x, y, w, h, ignoreSlot)
+    if x < 1 or y < 1 or (x + w - 1) > bagInv.gridW or (y + h - 1) > bagInv.gridH then
+        return false
+    end
+
+    for _, item in ipairs(bagInv.items) do
+        if item.slot ~= ignoreSlot then
+            local data = GetItemData(item.name)
+            local iW = data and data.size and data.size.w or 1
+            local iH = data and data.size and data.size.h or 1
+
+            local overlapsX = not ((x + w - 1) < item.x or x > (item.x + iW - 1))
+            local overlapsY = not ((y + h - 1) < item.y or y > (item.y + iH - 1))
+
+            if overlapsX and overlapsY then
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
+local function FindFreeSpotInBag(bagInv, itemName)
+    local data = GetItemData(itemName)
+    if not data then return nil end
+
+    local w = data.size and data.size.w or 1
+    local h = data.size and data.size.h or 1
+
+    for y = 1, bagInv.gridH do
+        for x = 1, bagInv.gridW do
+            if IsSpotFreeInBag(bagInv, x, y, w, h) then
+                return {x = x, y = y}
+            end
+        end
+    end
+
+    return nil
+end
+
+local function FlushBag(bagId)
+    local bagInv = BagInventories[bagId]
+    if not bagInv then return end
+
+    local itemsJson = json.encode(bagInv.items)
+
+    exports.oxmysql:execute(
+        'INSERT INTO inventories (identifier, inventory_type, inventory_id, items, hotbar) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE items = VALUES(items)',
+        {bagId, 'bag', bagId, itemsJson, '{}'},
+        function()
+            bagInv.isDirty = false
+        end
+    )
+end
+
+local function SaveBag(bagId)
+    local bagInv = BagInventories[bagId]
+    if not bagInv then return end
+
+    bagInv.isDirty = true
+
+    local viewer = BagViewers[bagId]
+    if viewer then
+        TriggerClientEvent('corex-inventory:client:syncBag', viewer, bagId,
+            bagInv.items, bagInv.weight, bagInv.maxWeight)
+    end
+end
+
+local function LoadBag(bagId, gridW, gridH, maxWeight, callback)
+    if BagInventories[bagId] then
+        if callback then callback(BagInventories[bagId]) end
+        return
+    end
+
+    exports.oxmysql:query(
+        'SELECT items FROM inventories WHERE identifier = ? AND inventory_type = ? LIMIT 1',
+        {bagId, 'bag'},
+        function(results)
+            local result = results and results[1]
+            local items = (result and result.items and json.decode(result.items)) or {}
+
+            BagInventories[bagId] = {
+                items     = items,
+                weight    = CalculateWeight(items),
+                maxWeight = maxWeight or 20.0,
+                gridW     = gridW or 4,
+                gridH     = gridH or 3,
+                isDirty   = false
+            }
+
+            if callback then callback(BagInventories[bagId]) end
+        end
+    )
+end
+
+-- Player uses a bag item → open bag panel
+RegisterNetEvent('corex-inventory:server:openBag', function(slotId)
+    local src = source
+    local inv  = Inventories[src]
+    if not inv then return end
+
+    local bagItem = nil
+    for _, item in ipairs(inv.items) do
+        if tostring(item.slot) == tostring(slotId) then
+            bagItem = item
+            break
+        end
+    end
+
+    if not bagItem then
+        Debug('Warn', ('openBag: item not found (src=%d slot=%s)'):format(src, tostring(slotId)))
+        return
+    end
+
+    local itemDef = GetItemData(bagItem.name)
+    if not itemDef or not itemDef.isBag then
+        Debug('Warn', ('openBag: not a bag (src=%d name=%s)'):format(src, bagItem.name))
+        return
+    end
+
+    -- Generate unique ID the first time this bag is opened
+    bagItem.metadata = bagItem.metadata or {}
+    if not bagItem.metadata.bagId then
+        bagItem.metadata.bagId = GenerateBagId()
+        SaveInventory(src, false)
+    end
+
+    local bagId     = bagItem.metadata.bagId
+    local gridW     = itemDef.bagGrid and itemDef.bagGrid.w or 4
+    local gridH     = itemDef.bagGrid and itemDef.bagGrid.h or 3
+    local maxWeight = itemDef.bagMaxWeight or 20.0
+
+    BagViewers[bagId] = src
+
+    LoadBag(bagId, gridW, gridH, maxWeight, function(bagInv)
+        TriggerClientEvent('corex-inventory:client:openBag', src, {
+            bagId     = bagId,
+            bagSlot   = slotId,
+            items     = bagInv.items,
+            weight    = bagInv.weight,
+            maxWeight = bagInv.maxWeight,
+            gridW     = bagInv.gridW,
+            gridH     = bagInv.gridH,
+            itemsData = GetAllItemsData()
+        })
+    end)
+end)
+
+-- Player closes bag UI
+RegisterNetEvent('corex-inventory:server:closeBag', function(bagId)
+    local src = source
+    if type(bagId) ~= 'string' then return end
+
+    if BagViewers[bagId] == src then
+        BagViewers[bagId] = nil
+    end
+
+    if BagInventories[bagId] and BagInventories[bagId].isDirty then
+        FlushBag(bagId)
+    end
+end)
+
+-- Move item: player inventory → bag
+RegisterNetEvent('corex-inventory:server:moveToBag', function(bagId, playerSlotId, bagX, bagY)
+    local src = source
+    if type(bagId) ~= 'string' then return end
+    if not TrySetBusy(src) then return end
+
+    local inv    = Inventories[src]
+    local bagInv = BagInventories[bagId]
+
+    if not inv or not bagInv or BagViewers[bagId] ~= src then
+        ClearBusy(src)
+        return
+    end
+
+    local itemIndex, item = nil, nil
+    for i, it in ipairs(inv.items) do
+        if tostring(it.slot) == tostring(playerSlotId) then
+            itemIndex, item = i, it
+            break
+        end
+    end
+
+    if not item then
+        ClearBusy(src)
+        return
+    end
+
+    local data = GetItemData(item.name)
+    if not data then
+        ClearBusy(src)
+        return
+    end
+
+    -- Bags cannot go inside bags
+    if data.isBag then
+        Notify(src, 'You cannot put a bag inside a bag', 'error')
+        ClearBusy(src)
+        return
+    end
+
+    local w, h = data.size and data.size.w or 1, data.size and data.size.h or 1
+
+    local placeX, placeY = tonumber(bagX), tonumber(bagY)
+    if not placeX or not placeY or not IsSpotFreeInBag(bagInv, placeX, placeY, w, h) then
+        local free = FindFreeSpotInBag(bagInv, item.name)
+        if not free then
+            Notify(src, 'No space in bag', 'error')
+            ClearBusy(src)
+            return
+        end
+        placeX, placeY = free.x, free.y
+    end
+
+    local addWeight = data.weight * item.count
+    if bagInv.weight + addWeight > bagInv.maxWeight then
+        Notify(src, 'Bag is too heavy', 'error')
+        ClearBusy(src)
+        return
+    end
+
+    table.remove(inv.items, itemIndex)
+    inv.weight = inv.weight - addWeight
+
+    table.insert(bagInv.items, {
+        name     = item.name,
+        count    = item.count,
+        x        = placeX,
+        y        = placeY,
+        slot     = NextSlotId(),
+        metadata = ShallowCopy(item.metadata or {})
+    })
+    bagInv.weight = bagInv.weight + addWeight
+
+    SaveInventory(src)
+    SaveBag(bagId)
+    TriggerClientEvent('corex-inventory:client:update', src, inv)
+
+    ClearBusy(src)
+end)
+
+-- Move item: bag → player inventory
+RegisterNetEvent('corex-inventory:server:moveFromBag', function(bagId, bagSlotId, playerX, playerY)
+    local src = source
+    if type(bagId) ~= 'string' then return end
+    if not TrySetBusy(src) then return end
+
+    local inv    = Inventories[src]
+    local bagInv = BagInventories[bagId]
+
+    if not inv or not bagInv or BagViewers[bagId] ~= src then
+        ClearBusy(src)
+        return
+    end
+
+    local itemIndex, item = nil, nil
+    for i, it in ipairs(bagInv.items) do
+        if tostring(it.slot) == tostring(bagSlotId) then
+            itemIndex, item = i, it
+            break
+        end
+    end
+
+    if not item then
+        ClearBusy(src)
+        return
+    end
+
+    local data = GetItemData(item.name)
+    if not data then
+        ClearBusy(src)
+        return
+    end
+
+    local w, h = data.size and data.size.w or 1, data.size and data.size.h or 1
+
+    local placeX, placeY = tonumber(playerX), tonumber(playerY)
+    if not placeX or not placeY or not IsSpotFree(inv, placeX, placeY, w, h) then
+        local free = FindFreeSpot(inv, item.name)
+        if not free then
+            Notify(src, 'No space in inventory', 'error')
+            ClearBusy(src)
+            return
+        end
+        placeX, placeY = free.x, free.y
+    end
+
+    local addWeight = data.weight * item.count
+    if inv.weight + addWeight > inv.maxWeight then
+        Notify(src, 'Inventory too heavy', 'error')
+        ClearBusy(src)
+        return
+    end
+
+    table.remove(bagInv.items, itemIndex)
+    bagInv.weight = bagInv.weight - addWeight
+
+    table.insert(inv.items, {
+        name     = item.name,
+        count    = item.count,
+        x        = placeX,
+        y        = placeY,
+        slot     = NextSlotId(),
+        metadata = ShallowCopy(item.metadata or {})
+    })
+    inv.weight = inv.weight + addWeight
+
+    SaveBag(bagId)
+    SaveInventory(src)
+    TriggerClientEvent('corex-inventory:client:update', src, inv)
+
+    ClearBusy(src)
+end)
+
+-- Reposition item within bag grid
+RegisterNetEvent('corex-inventory:server:moveBagItem', function(bagId, bagSlotId, newX, newY)
+    local src = source
+    if type(bagId) ~= 'string' then return end
+
+    local bagInv = BagInventories[bagId]
+    if not bagInv or BagViewers[bagId] ~= src then return end
+
+    local item = nil
+    for _, it in ipairs(bagInv.items) do
+        if tostring(it.slot) == tostring(bagSlotId) then
+            item = it
+            break
+        end
+    end
+
+    if not item then return end
+
+    local data = GetItemData(item.name)
+    local w = data and data.size and data.size.w or 1
+    local h = data and data.size and data.size.h or 1
+
+    if IsSpotFreeInBag(bagInv, newX, newY, w, h, bagSlotId) then
+        item.x = newX
+        item.y = newY
+        SaveBag(bagId)
+    end
+
+    TriggerClientEvent('corex-inventory:client:syncBag', src, bagId,
+        bagInv.items, bagInv.weight, bagInv.maxWeight)
+end)
+
+-- Flush bag when its viewer disconnects
+AddEventHandler('playerDropped', function()
+    local src = source
+    for bagId, viewer in pairs(BagViewers) do
+        if viewer == src then
+            BagViewers[bagId] = nil
+            if BagInventories[bagId] and BagInventories[bagId].isDirty then
+                FlushBag(bagId)
+            end
+        end
+    end
+end)
+
+-- Flush all dirty bags on resource stop
+AddEventHandler('onResourceStop', function(resourceName)
+    if GetCurrentResourceName() ~= resourceName then return end
+    for bagId, bagInv in pairs(BagInventories) do
+        if bagInv.isDirty then
+            FlushBag(bagId)
+        end
+    end
+end)
+
+-- Batched bag persistence — same cadence as player inventories (30s)
+CreateThread(function()
+    Wait(5000)
+    while true do
+        Wait(30000)
+        for bagId, bagInv in pairs(BagInventories) do
+            if bagInv.isDirty then
+                FlushBag(bagId)
+            end
+        end
+    end
+end)
+
+exports('GetBagContents', function(bagId)
+    local bagInv = BagInventories[bagId]
+    return bagInv and bagInv.items or nil
+end)
 
 RegisterCommand('cleardrops', function()
     DroppedItems = {}

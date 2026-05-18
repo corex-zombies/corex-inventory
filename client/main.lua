@@ -53,6 +53,7 @@ local PICKUP_DISTANCE = Config.PickupDistance or 3.0
 local DEFAULT_PROP = 'prop_med_bag_01b'
 local MAX_DROPPED_ITEMS = 500
 local activeRentalVehicle = nil
+local currentBagId = nil
 
 local function GetRarityColor(rarity)
     if not Rarity then return {r = 139, g = 148, b = 158, a = 255} end
@@ -300,6 +301,11 @@ local function CloseInventory()
     currentShop = nil
     currentShopType = nil
 
+    if currentBagId then
+        TriggerServerEvent('corex-inventory:server:closeBag', currentBagId)
+        currentBagId = nil
+    end
+
     CreateThread(function()
         Wait(100)
         SetNuiFocus(false, false)
@@ -420,6 +426,12 @@ RegisterNetEvent('corex-inventory:client:useItem', function(itemName, itemData)
     local ammoDef = Ammo[itemName]
     if ammoDef then
         TriggerEvent('corex-inventory:internal:addAmmo', itemName, itemData or {})
+        return
+    end
+
+    local itemDef = GetItemDefinition(itemName)
+    if itemDef and itemDef.isBag then
+        TriggerServerEvent('corex-inventory:server:openBag', (itemData or {}).slot)
         return
     end
 
@@ -794,6 +806,59 @@ RegisterKeyMapping('+quickslot3', 'Quick Slot 3', 'keyboard', '3')
 RegisterKeyMapping('+quickslot4', 'Quick Slot 4', 'keyboard', '4')
 RegisterKeyMapping('+quickslot5', 'Quick Slot 5', 'keyboard', '5')
 RegisterKeyMapping('+quickslot6', 'Quick Slot 6', 'keyboard', '6')
+
+-- =============================================================
+-- BAG SYSTEM - CLIENT
+-- =============================================================
+
+RegisterNetEvent('corex-inventory:client:openBag', function(bagData)
+    if not bagData or not bagData.bagId then return end
+    currentBagId = bagData.bagId
+    SendNUIMessage({
+        action   = 'openBag',
+        bag      = bagData
+    })
+end)
+
+RegisterNetEvent('corex-inventory:client:syncBag', function(bagId, items, weight, maxWeight)
+    if currentBagId ~= bagId then return end
+    SendNUIMessage({
+        action    = 'syncBag',
+        bagId     = bagId,
+        items     = items,
+        weight    = weight,
+        maxWeight = maxWeight
+    })
+end)
+
+RegisterNUICallback('closeBag', function(data, cb)
+    if currentBagId then
+        TriggerServerEvent('corex-inventory:server:closeBag', currentBagId)
+        currentBagId = nil
+    end
+    cb('ok')
+end)
+
+RegisterNUICallback('moveToBag', function(data, cb)
+    if not currentBagId then cb('no_bag') return end
+    TriggerServerEvent('corex-inventory:server:moveToBag',
+        currentBagId, data.playerSlot, data.bagX, data.bagY)
+    cb('ok')
+end)
+
+RegisterNUICallback('moveFromBag', function(data, cb)
+    if not currentBagId then cb('no_bag') return end
+    TriggerServerEvent('corex-inventory:server:moveFromBag',
+        currentBagId, data.bagSlot, data.playerX, data.playerY)
+    cb('ok')
+end)
+
+RegisterNUICallback('moveBagItem', function(data, cb)
+    if not currentBagId then cb('no_bag') return end
+    TriggerServerEvent('corex-inventory:server:moveBagItem',
+        currentBagId, data.bagSlot, data.x, data.y)
+    cb('ok')
+end)
 
 CreateThread(function()
     local weaponWheelControls = { 37, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 261, 262 }

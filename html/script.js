@@ -729,23 +729,43 @@ function handleDragMove(e) {
     const size = getItemSize(draggedItem);
 
     if (dragSource === 'player' && playerSlot) {
-        const valid = !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || [], draggedItem.slot);
+        const target = COREXStackingUI.getItemAtCell(
+            inventoryData?.items || [], itemsData, playerSlot.x, playerSlot.y, draggedItem.slot
+        );
+        const valid = COREXStackingUI.canMerge(draggedItem, target, itemsData)
+            || !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || [], draggedItem.slot);
         showDragPreviewAt(playerSlot, draggedItem, valid, false);
     } else if (dragSource === 'ground' && playerSlot) {
-        const valid = !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
+        const target = COREXStackingUI.getItemAtCell(
+            inventoryData?.items || [], itemsData, playerSlot.x, playerSlot.y, null
+        );
+        const valid = COREXStackingUI.canMerge(draggedItem, target, itemsData)
+            || !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
         showDragPreviewAt(playerSlot, draggedItem, valid, false);
     } else if (dragSource === 'bag' && playerSlot) {
-        const valid = !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
+        const target = COREXStackingUI.getItemAtCell(
+            inventoryData?.items || [], itemsData, playerSlot.x, playerSlot.y, null
+        );
+        const valid = COREXStackingUI.canMerge(draggedItem, target, itemsData)
+            || !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
         showDragPreviewAt(playerSlot, draggedItem, valid, false);
     } else if (dragSource === 'player' && dropSlot) {
         if (isBagMode) {
-            const valid = !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || []);
+            const target = COREXStackingUI.getItemAtCell(
+                bagInventoryData?.items || [], itemsData, dropSlot.x, dropSlot.y, null
+            );
+            const valid = COREXStackingUI.canMerge(draggedItem, target, itemsData)
+                || !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || []);
             showDragPreviewAt(dropSlot, draggedItem, valid, false);
         } else {
             showDragPreviewAt(dropSlot, draggedItem, true, true);
         }
     } else if (dragSource === 'bag' && dropSlot) {
-        const valid = !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || [], draggedItem.slot);
+        const target = COREXStackingUI.getItemAtCell(
+            bagInventoryData?.items || [], itemsData, dropSlot.x, dropSlot.y, draggedItem.slot
+        );
+        const valid = COREXStackingUI.canMerge(draggedItem, target, itemsData)
+            || !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || [], draggedItem.slot);
         showDragPreviewAt(dropSlot, draggedItem, valid, false);
     } else {
         hideDragPreview();
@@ -763,40 +783,76 @@ function handleDragEnd(e) {
     const size = getItemSize(draggedItem);
 
     if (dragSource === 'player' && playerSlot) {
-        const valid = !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || [], draggedItem.slot);
+        const target = COREXStackingUI.getItemAtCell(
+            inventoryData?.items || [], itemsData, playerSlot.x, playerSlot.y, draggedItem.slot
+        );
+        const merge = COREXStackingUI.canMerge(draggedItem, target, itemsData);
+        const valid = merge
+            || !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || [], draggedItem.slot);
         if (valid) {
             fetch(`https://${GetParentResourceName()}/moveItem`, {
                 method: 'POST',
                 body: JSON.stringify({
                     slotId: draggedItem.slot,
                     x: playerSlot.x,
-                    y: playerSlot.y
+                    y: playerSlot.y,
+                    targetSlotId: merge ? target.slot : null
                 })
             }).catch(() => {});
         }
     } else if (dragSource === 'bag' && playerSlot) {
-        const valid = !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
+        const target = COREXStackingUI.getItemAtCell(
+            inventoryData?.items || [], itemsData, playerSlot.x, playerSlot.y, null
+        );
+        const merge = COREXStackingUI.canMerge(draggedItem, target, itemsData);
+        const valid = merge
+            || !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
         if (valid) {
             fetch(`https://${GetParentResourceName()}/moveFromBag`, {
                 method: 'POST',
-                body: JSON.stringify({ bagSlot: draggedItem.slot, playerX: playerSlot.x, playerY: playerSlot.y })
+                body: JSON.stringify({
+                    bagSlot: draggedItem.slot,
+                    playerX: playerSlot.x,
+                    playerY: playerSlot.y,
+                    targetSlotId: merge ? target.slot : null
+                })
             }).catch(() => {});
         }
     } else if (dragSource === 'bag' && dropSlot) {
-        const valid = !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || [], draggedItem.slot);
+        const target = COREXStackingUI.getItemAtCell(
+            bagInventoryData?.items || [], itemsData, dropSlot.x, dropSlot.y, draggedItem.slot
+        );
+        const merge = COREXStackingUI.canMerge(draggedItem, target, itemsData);
+        const valid = merge
+            || !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || [], draggedItem.slot);
         if (valid) {
             fetch(`https://${GetParentResourceName()}/moveBagItem`, {
                 method: 'POST',
-                body: JSON.stringify({ bagSlot: draggedItem.slot, x: dropSlot.x, y: dropSlot.y })
+                body: JSON.stringify({
+                    bagSlot: draggedItem.slot,
+                    x: dropSlot.x,
+                    y: dropSlot.y,
+                    targetSlotId: merge ? target.slot : null
+                })
             }).catch(() => {});
         }
     } else if (dragSource === 'player' && dropSlot) {
         if (isBagMode) {
-            const valid = !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || []);
+            const target = COREXStackingUI.getItemAtCell(
+                bagInventoryData?.items || [], itemsData, dropSlot.x, dropSlot.y, null
+            );
+            const merge = COREXStackingUI.canMerge(draggedItem, target, itemsData);
+            const valid = merge
+                || !checkBagCollision(dropSlot.x, dropSlot.y, size.w, size.h, bagInventoryData?.items || []);
             if (valid) {
                 fetch(`https://${GetParentResourceName()}/moveToBag`, {
                     method: 'POST',
-                    body: JSON.stringify({ playerSlot: draggedItem.slot, bagX: dropSlot.x, bagY: dropSlot.y })
+                    body: JSON.stringify({
+                        playerSlot: draggedItem.slot,
+                        bagX: dropSlot.x,
+                        bagY: dropSlot.y,
+                        targetSlotId: merge ? target.slot : null
+                    })
                 }).catch(() => {});
             }
         } else {
@@ -812,7 +868,11 @@ function handleDragEnd(e) {
             }).catch(() => {});
         }
     } else if (dragSource === 'ground' && playerSlot) {
-        const valid = !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
+        const target = COREXStackingUI.getItemAtCell(
+            inventoryData?.items || [], itemsData, playerSlot.x, playerSlot.y, null
+        );
+        const valid = COREXStackingUI.canMerge(draggedItem, target, itemsData)
+            || !checkCollision(playerSlot.x, playerSlot.y, size.w, size.h, inventoryData?.items || []);
         if (valid) {
             fetch(`https://${GetParentResourceName()}/pickupItem`, {
                 method: 'POST',

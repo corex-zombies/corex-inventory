@@ -456,7 +456,7 @@ end)
 
 RegisterNUICallback('moveItem', function(data, cb)
     if data.slotId and data.x and data.y then
-        TriggerServerEvent('corex-inventory:server:move', data.slotId, data.x, data.y)
+        TriggerServerEvent('corex-inventory:server:move', data.slotId, data.x, data.y, data.targetSlotId)
     end
     cb('ok')
 end)
@@ -842,21 +842,21 @@ end)
 RegisterNUICallback('moveToBag', function(data, cb)
     if not currentBagId then cb('no_bag') return end
     TriggerServerEvent('corex-inventory:server:moveToBag',
-        currentBagId, data.playerSlot, data.bagX, data.bagY)
+        currentBagId, data.playerSlot, data.bagX, data.bagY, data.targetSlotId)
     cb('ok')
 end)
 
 RegisterNUICallback('moveFromBag', function(data, cb)
     if not currentBagId then cb('no_bag') return end
     TriggerServerEvent('corex-inventory:server:moveFromBag',
-        currentBagId, data.bagSlot, data.playerX, data.playerY)
+        currentBagId, data.bagSlot, data.playerX, data.playerY, data.targetSlotId)
     cb('ok')
 end)
 
 RegisterNUICallback('moveBagItem', function(data, cb)
     if not currentBagId then cb('no_bag') return end
     TriggerServerEvent('corex-inventory:server:moveBagItem',
-        currentBagId, data.bagSlot, data.x, data.y)
+        currentBagId, data.bagSlot, data.x, data.y, data.targetSlotId)
     cb('ok')
 end)
 

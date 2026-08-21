@@ -31,6 +31,7 @@ ui_page 'html/index.html'
 files {
     'html/index.html',
     'html/style.css',
+    'html/stacking.js',
     'html/script.js',
     'html/vehicle-shop.css',
     'html/vehicle-shop.js',

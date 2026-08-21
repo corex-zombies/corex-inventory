@@ -881,7 +881,7 @@ RegisterNetEvent('corex-inventory:server:open', function()
     end
 end)
 
-RegisterNetEvent('corex-inventory:server:move', function(slotId, newX, newY)
+RegisterNetEvent('corex-inventory:server:move', function(slotId, newX, newY, targetSlotId)
     local src = source
     if type(slotId) ~= 'string' and type(slotId) ~= 'number' then return end
     if type(newX) ~= 'number' or type(newY) ~= 'number' then return end
@@ -899,6 +899,23 @@ RegisterNetEvent('corex-inventory:server:move', function(slotId, newX, newY)
     if not item then return end
 
     local data = GetItemData(item.name)
+    if targetSlotId ~= nil then
+        local weaponDef = GetWeaponDefinition(item.name)
+        local merged = InventoryStacking.MergeSlots(
+            inv.items,
+            slotId,
+            targetSlotId,
+            data,
+            weaponDef ~= nil
+        )
+        if merged then
+            SaveInventory(src)
+            Debug('Verbose', 'Merged item stack ' .. item.name)
+        end
+        TriggerClientEvent('corex-inventory:client:update', src, inv)
+        return
+    end
+
     local w = data and data.size and data.size.w or 1
     local h = data and data.size and data.size.h or 1
 
@@ -1439,6 +1456,78 @@ local function FindFreeSpotInBag(bagInv, itemName)
     return nil
 end
 
+local function CollectFreePositionsInBag(bagInv, itemName, required, preferredX, preferredY)
+    if required <= 0 then return {} end
+
+    local data = GetItemData(itemName)
+    if not data then return nil end
+    local w = data.size and data.size.w or 1
+    local h = data.size and data.size.h or 1
+    local shadow = {
+        items = {},
+        gridW = bagInv.gridW,
+        gridH = bagInv.gridH
+    }
+    for _, item in ipairs(bagInv.items or {}) do shadow.items[#shadow.items + 1] = item end
+
+    local positions = {}
+    local function Reserve(position)
+        positions[#positions + 1] = { x = position.x, y = position.y }
+        shadow.items[#shadow.items + 1] = {
+            name = itemName,
+            x = position.x,
+            y = position.y,
+            slot = ('bag-reserved-%d'):format(#positions)
+        }
+    end
+
+    preferredX, preferredY = tonumber(preferredX), tonumber(preferredY)
+    if preferredX and preferredY and IsSpotFreeInBag(shadow, preferredX, preferredY, w, h) then
+        Reserve({ x = preferredX, y = preferredY })
+    end
+
+    while #positions < required do
+        local free = FindFreeSpotInBag(shadow, itemName)
+        if not free then return nil end
+        Reserve(free)
+    end
+    return positions
+end
+
+local function AddToBag(bagInv, itemName, count, metadata, preferredX, preferredY)
+    local data = GetItemData(itemName)
+    if not data then return false, 'Item not found' end
+    count = math.floor(tonumber(count) or 0)
+    if count < 1 then return false, 'Invalid count' end
+
+    local addWeight = (tonumber(data.weight) or 0) * count
+    if bagInv.weight + addWeight > bagInv.maxWeight then return false, 'Bag is too heavy' end
+
+    local weaponDef = GetWeaponDefinition(itemName)
+    local safeMetadata = EnsureItemMetadata(itemName, metadata)
+    local required = InventoryStacking.RequiredNewSlots(
+        bagInv.items, data, itemName, count, safeMetadata, weaponDef ~= nil
+    )
+    local positions = CollectFreePositionsInBag(
+        bagInv, itemName, required, preferredX, preferredY
+    )
+    if not positions then return false, 'No space in bag' end
+
+    local added, reason = InventoryStacking.Add(
+        bagInv.items,
+        data,
+        itemName,
+        count,
+        safeMetadata,
+        positions,
+        NextSlotId,
+        weaponDef ~= nil
+    )
+    if not added then return false, reason end
+    bagInv.weight = bagInv.weight + addWeight
+    return true
+end
+
 local function FlushBag(bagId)
     local bagInv = BagInventories[bagId]
     if not bagInv then return end
@@ -1562,7 +1651,7 @@ RegisterNetEvent('corex-inventory:server:closeBag', function(bagId)
 end)
 
 -- Move item: player inventory → bag
-RegisterNetEvent('corex-inventory:server:moveToBag', function(bagId, playerSlotId, bagX, bagY)
+RegisterNetEvent('corex-inventory:server:moveToBag', function(bagId, playerSlotId, bagX, bagY, targetSlotId)
     local src = source
     if type(bagId) ~= 'string' then return end
     if not TrySetBusy(src) then return end
@@ -1601,38 +1690,18 @@ RegisterNetEvent('corex-inventory:server:moveToBag', function(bagId, playerSlotI
         return
     end
 
-    local w, h = data.size and data.size.w or 1, data.size and data.size.h or 1
-
-    local placeX, placeY = tonumber(bagX), tonumber(bagY)
-    if not placeX or not placeY or not IsSpotFreeInBag(bagInv, placeX, placeY, w, h) then
-        local free = FindFreeSpotInBag(bagInv, item.name)
-        if not free then
-            Notify(src, 'No space in bag', 'error')
-            ClearBusy(src)
-            return
-        end
-        placeX, placeY = free.x, free.y
-    end
-
-    local addWeight = data.weight * item.count
-    if bagInv.weight + addWeight > bagInv.maxWeight then
-        Notify(src, 'Bag is too heavy', 'error')
+    local transferCount = math.max(0, math.floor(tonumber(item.count) or 0))
+    local added, reason = AddToBag(
+        bagInv, item.name, transferCount, item.metadata, tonumber(bagX), tonumber(bagY)
+    )
+    if not added then
+        Notify(src, reason or 'Unable to move item to bag', 'error')
         ClearBusy(src)
         return
     end
 
     table.remove(inv.items, itemIndex)
-    inv.weight = inv.weight - addWeight
-
-    table.insert(bagInv.items, {
-        name     = item.name,
-        count    = item.count,
-        x        = placeX,
-        y        = placeY,
-        slot     = NextSlotId(),
-        metadata = ShallowCopy(item.metadata or {})
-    })
-    bagInv.weight = bagInv.weight + addWeight
+    inv.weight = math.max(0, inv.weight - ((tonumber(data.weight) or 0) * transferCount))
 
     SaveInventory(src)
     SaveBag(bagId)
@@ -1642,7 +1711,7 @@ RegisterNetEvent('corex-inventory:server:moveToBag', function(bagId, playerSlotI
 end)
 
 -- Move item: bag → player inventory
-RegisterNetEvent('corex-inventory:server:moveFromBag', function(bagId, bagSlotId, playerX, playerY)
+RegisterNetEvent('corex-inventory:server:moveFromBag', function(bagId, bagSlotId, playerX, playerY, targetSlotId)
     local src = source
     if type(bagId) ~= 'string' then return end
     if not TrySetBusy(src) then return end
@@ -1674,38 +1743,18 @@ RegisterNetEvent('corex-inventory:server:moveFromBag', function(bagId, bagSlotId
         return
     end
 
-    local w, h = data.size and data.size.w or 1, data.size and data.size.h or 1
-
-    local placeX, placeY = tonumber(playerX), tonumber(playerY)
-    if not placeX or not placeY or not IsSpotFree(inv, placeX, placeY, w, h) then
-        local free = FindFreeSpot(inv, item.name)
-        if not free then
-            Notify(src, 'No space in inventory', 'error')
-            ClearBusy(src)
-            return
-        end
-        placeX, placeY = free.x, free.y
-    end
-
-    local addWeight = data.weight * item.count
-    if inv.weight + addWeight > inv.maxWeight then
-        Notify(src, 'Inventory too heavy', 'error')
+    local transferCount = math.max(0, math.floor(tonumber(item.count) or 0))
+    local added, reason = AddToInventory(
+        inv, item.name, transferCount, item.metadata, tonumber(playerX), tonumber(playerY)
+    )
+    if not added then
+        Notify(src, reason or 'Unable to move item to inventory', 'error')
         ClearBusy(src)
         return
     end
 
     table.remove(bagInv.items, itemIndex)
-    bagInv.weight = bagInv.weight - addWeight
-
-    table.insert(inv.items, {
-        name     = item.name,
-        count    = item.count,
-        x        = placeX,
-        y        = placeY,
-        slot     = NextSlotId(),
-        metadata = ShallowCopy(item.metadata or {})
-    })
-    inv.weight = inv.weight + addWeight
+    bagInv.weight = math.max(0, bagInv.weight - ((tonumber(data.weight) or 0) * transferCount))
 
     SaveBag(bagId)
     SaveInventory(src)
@@ -1715,12 +1764,16 @@ RegisterNetEvent('corex-inventory:server:moveFromBag', function(bagId, bagSlotId
 end)
 
 -- Reposition item within bag grid
-RegisterNetEvent('corex-inventory:server:moveBagItem', function(bagId, bagSlotId, newX, newY)
+RegisterNetEvent('corex-inventory:server:moveBagItem', function(bagId, bagSlotId, newX, newY, targetSlotId)
     local src = source
     if type(bagId) ~= 'string' then return end
+    if not TrySetBusy(src) then return end
 
     local bagInv = BagInventories[bagId]
-    if not bagInv or BagViewers[bagId] ~= src then return end
+    if not bagInv or BagViewers[bagId] ~= src then
+        ClearBusy(src)
+        return
+    end
 
     local item = nil
     for _, it in ipairs(bagInv.items) do
@@ -1730,20 +1783,42 @@ RegisterNetEvent('corex-inventory:server:moveBagItem', function(bagId, bagSlotId
         end
     end
 
-    if not item then return end
+    if not item then
+        ClearBusy(src)
+        return
+    end
 
     local data = GetItemData(item.name)
     local w = data and data.size and data.size.w or 1
     local h = data and data.size and data.size.h or 1
 
-    if IsSpotFreeInBag(bagInv, newX, newY, w, h, bagSlotId) then
+    local changed = false
+    if targetSlotId ~= nil then
+        local weaponDef = GetWeaponDefinition(item.name)
+        changed = InventoryStacking.MergeSlots(
+            bagInv.items, bagSlotId, targetSlotId, data, weaponDef ~= nil
+        ) == true
+    else
+        newX, newY = tonumber(newX), tonumber(newY)
+        if not newX or not newY then
+            ClearBusy(src)
+            return
+        end
+    end
+
+    if targetSlotId == nil and IsSpotFreeInBag(bagInv, newX, newY, w, h, bagSlotId) then
         item.x = newX
         item.y = newY
+        changed = true
+    end
+
+    if changed then
         SaveBag(bagId)
     end
 
     TriggerClientEvent('corex-inventory:client:syncBag', src, bagId,
         bagInv.items, bagInv.weight, bagInv.maxWeight)
+    ClearBusy(src)
 end)
 
 -- Flush bag when its viewer disconnects

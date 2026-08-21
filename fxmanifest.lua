@@ -15,6 +15,7 @@ shared_scripts {
 }
 
 server_scripts {
+    'server/stacking.lua',
     'server/main.lua'
 }
 

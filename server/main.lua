@@ -354,18 +354,8 @@ local function FindInventoryItem(inv, itemName, slotId)
 end
 
 local function GetInventoryItemCount(inv, itemName)
-    if not inv or not inv.items or type(itemName) ~= 'string' then
-        return 0
-    end
-
-    local total = 0
-    for _, item in ipairs(inv.items) do
-        if item.name == itemName then
-            total = total + (tonumber(item.count) or 0)
-        end
-    end
-
-    return total
+    if not inv or not inv.items then return 0 end
+    return InventoryStacking.Count(inv.items, itemName)
 end
 
 local function CalculateWeight(items)
@@ -423,6 +413,77 @@ local function FindFreeSpot(inventory, itemName)
     end
 
     return nil
+end
+
+local function CollectFreePositions(inventory, itemName, required, preferredX, preferredY)
+    if required <= 0 then return {} end
+
+    local data = GetItemData(itemName)
+    if not data then return nil end
+    local w = data.size and data.size.w or 1
+    local h = data.size and data.size.h or 1
+    local shadow = { items = {} }
+    for _, item in ipairs(inventory.items or {}) do
+        shadow.items[#shadow.items + 1] = item
+    end
+
+    local positions = {}
+    local function Reserve(position)
+        positions[#positions + 1] = { x = position.x, y = position.y }
+        shadow.items[#shadow.items + 1] = {
+            name = itemName,
+            x = position.x,
+            y = position.y,
+            slot = ('reserved-%d'):format(#positions)
+        }
+    end
+
+    preferredX, preferredY = tonumber(preferredX), tonumber(preferredY)
+    if preferredX and preferredY and IsSpotFree(shadow, preferredX, preferredY, w, h) then
+        Reserve({ x = preferredX, y = preferredY })
+    end
+
+    while #positions < required do
+        local free = FindFreeSpot(shadow, itemName)
+        if not free then return nil end
+        Reserve(free)
+    end
+
+    return positions
+end
+
+local function AddToInventory(inv, itemName, count, metadata, preferredX, preferredY)
+    count = math.floor(tonumber(count) or 0)
+    if count < 1 then return false, 'Invalid count' end
+
+    local data = GetItemData(itemName)
+    if not data then return false, 'Item not found' end
+    metadata = EnsureItemMetadata(itemName, metadata)
+
+    local addWeight = (tonumber(data.weight) or 0) * count
+    if inv.weight + addWeight > inv.maxWeight then return false, 'Too heavy' end
+
+    local weaponDef = GetWeaponDefinition(itemName)
+    local required = InventoryStacking.RequiredNewSlots(
+        inv.items, data, itemName, count, metadata, weaponDef ~= nil
+    )
+    local positions = CollectFreePositions(inv, itemName, required, preferredX, preferredY)
+    if not positions then return false, 'No space' end
+
+    local ok, reason = InventoryStacking.Add(
+        inv.items,
+        data,
+        itemName,
+        count,
+        metadata,
+        positions,
+        NextSlotId,
+        weaponDef ~= nil
+    )
+    if not ok then return false, reason end
+
+    inv.weight = inv.weight + addWeight
+    return true
 end
 
 local function GetIdentifier(src)
@@ -687,43 +748,20 @@ local function PickupItem(src, dropId, gridX, gridY)
         return false
     end
 
-    local data = GetItemData(dropData.name)
-    if not data then
+    local added, addError = AddToInventory(
+        inv,
+        dropData.name,
+        dropData.count,
+        dropData.metadata,
+        gridX,
+        gridY
+    )
+    if not added then
+        Debug('Warn', 'Pickup failed: ' .. tostring(addError))
         ClearBusy(src)
         return false
     end
 
-    local w = data.size and data.size.w or 1
-    local h = data.size and data.size.h or 1
-
-    if not IsSpotFree(inv, gridX, gridY, w, h) then
-        local freeSpot = FindFreeSpot(inv, dropData.name)
-        if not freeSpot then
-            Debug('Warn', 'Pickup failed: No space')
-            ClearBusy(src)
-            return false
-        end
-        gridX = freeSpot.x
-        gridY = freeSpot.y
-    end
-
-    local addWeight = data.weight * dropData.count
-    if inv.weight + addWeight > inv.maxWeight then
-        Debug('Warn', 'Pickup failed: Too heavy')
-        ClearBusy(src)
-        return false
-    end
-
-    table.insert(inv.items, {
-        name = dropData.name,
-        count = dropData.count,
-        x = gridX,
-        y = gridY,
-        slot = NextSlotId(),
-        metadata = EnsureItemMetadata(dropData.name, dropData.metadata)
-    })
-
-    inv.weight = inv.weight + addWeight
     DroppedItems[dropId] = nil
 
     SaveInventory(src)
@@ -738,62 +776,11 @@ local function PickupItem(src, dropId, gridX, gridY)
 end
 
 local function AddItem(src, itemName, count, metadata, x, y)
-    count = count or 1
-    metadata = EnsureItemMetadata(itemName, metadata)
-
     local inv = Inventories[src]
     if not inv then return false, 'No inventory' end
 
-    local data = GetItemData(itemName)
-    if not data then return false, 'Item not found' end
-
-    local addWeight = data.weight * count
-    if inv.weight + addWeight > inv.maxWeight then
-        return false, 'Too heavy'
-    end
-
-    if data.stackable then
-        for _, item in ipairs(inv.items) do
-            if item.name == itemName then
-                local canAdd = data.maxStack - item.count
-                if canAdd >= count then
-                    item.count = item.count + count
-                    inv.weight = inv.weight + addWeight
-                    SaveInventory(src)
-                    TriggerClientEvent('corex-inventory:client:update', src, inv)
-                    return true
-                end
-            end
-        end
-    end
-
-    local pos
-    if x and y then
-        local w = data.size and data.size.w or 1
-        local h = data.size and data.size.h or 1
-        if IsSpotFree(inv, x, y, w, h) then
-            pos = {x = x, y = y}
-        end
-    end
-
-    if not pos then
-        pos = FindFreeSpot(inv, itemName)
-    end
-
-    if not pos then
-        return false, 'No space'
-    end
-
-    table.insert(inv.items, {
-        name = itemName,
-        count = count,
-        x = pos.x,
-        y = pos.y,
-        slot = NextSlotId(),
-        metadata = ShallowCopy(metadata)
-    })
-
-    inv.weight = inv.weight + addWeight
+    local added, addError = AddToInventory(inv, itemName, count or 1, metadata, x, y)
+    if not added then return false, addError end
     SaveInventory(src)
     TriggerClientEvent('corex-inventory:client:update', src, inv)
 
@@ -801,31 +788,21 @@ local function AddItem(src, itemName, count, metadata, x, y)
 end
 
 local function RemoveItem(src, itemName, count)
-    count = count or 1
+    count = math.floor(tonumber(count) or 1)
+    if count < 1 then return false end
     local inv = Inventories[src]
     if not inv then return false end
 
-    for i, item in ipairs(inv.items) do
-        if item.name == itemName then
-            local data = GetItemData(itemName)
+    local removed = InventoryStacking.Remove(inv.items, itemName, count)
+    if not removed then return false end
 
-            if item.count > count then
-                item.count = item.count - count
-                if data then inv.weight = inv.weight - (data.weight * count) end
-                SaveInventory(src)
-                TriggerClientEvent('corex-inventory:client:update', src, inv)
-                return true
-            elseif item.count == count then
-                if data then inv.weight = inv.weight - (data.weight * count) end
-                table.remove(inv.items, i)
-                SaveInventory(src)
-                TriggerClientEvent('corex-inventory:client:update', src, inv)
-                return true
-            end
-        end
+    local data = GetItemData(itemName)
+    if data then
+        inv.weight = math.max(0.0, inv.weight - ((tonumber(data.weight) or 0) * count))
     end
-
-    return false
+    SaveInventory(src)
+    TriggerClientEvent('corex-inventory:client:update', src, inv)
+    return true
 end
 
 ---Remove a single inventory stack by slot id (for unique metadata items).
@@ -1154,20 +1131,15 @@ RegisterNetEvent('corex-inventory:server:give', function(targetPlayer, itemName,
     end
 
     local giveCount = math.min(count or item.count, item.count)
-    local addWeight = data.weight * giveCount
-
-    if targetInv.weight + addWeight > targetInv.maxWeight then
-        Debug('Warn', 'Give failed: Target inventory full')
-        Notify(src, 'Target inventory is full', 'error')
-        ClearBusy(src)
-        ClearBusy(targetSrc)
-        return
-    end
-
-    local freeSpot = FindFreeSpot(targetInv, item.name)
-    if not freeSpot then
-        Debug('Warn', 'Give failed: No space in target inventory')
-        Notify(src, 'Target has no space', 'error')
+    local added, addError = AddToInventory(
+        targetInv,
+        item.name,
+        giveCount,
+        item.metadata
+    )
+    if not added then
+        Debug('Warn', 'Give failed: ' .. tostring(addError))
+        Notify(src, addError == 'Too heavy' and 'Target inventory is full' or 'Target has no space', 'error')
         ClearBusy(src)
         ClearBusy(targetSrc)
         return
@@ -1179,16 +1151,6 @@ RegisterNetEvent('corex-inventory:server:give', function(targetPlayer, itemName,
         table.remove(srcInv.items, itemIndex)
     end
     srcInv.weight = srcInv.weight - (data.weight * giveCount)
-
-    table.insert(targetInv.items, {
-        name = item.name,
-        count = giveCount,
-        x = freeSpot.x,
-        y = freeSpot.y,
-        slot = NextSlotId(),
-        metadata = EnsureItemMetadata(item.name, item.metadata)
-    })
-    targetInv.weight = targetInv.weight + addWeight
 
     SaveInventory(src)
     SaveInventory(targetSrc)
@@ -1392,28 +1354,14 @@ exports('PickupItem', PickupItem)
 exports('UpdateItemMeta', UpdateItemMeta)
 exports('GetItemMeta', GetItemMeta)
 exports('HasItem', function(src, itemName, count)
-    count = count or 1
     local inv = Inventories[src]
     if not inv then return false end
-
-    for _, item in ipairs(inv.items) do
-        if item.name == itemName and item.count >= count then
-            return true
-        end
-    end
-    return false
+    return InventoryStacking.HasItem(inv.items, itemName, count or 1)
 end)
 exports('GetItemCount', function(src, itemName)
     local inv = Inventories[src]
     if not inv then return 0 end
-
-    local total = 0
-    for _, item in ipairs(inv.items) do
-        if item.name == itemName then
-            total = total + item.count
-        end
-    end
-    return total
+    return InventoryStacking.Count(inv.items, itemName)
 end)
 
 -- [SECURITY] NetEvent 'corex-inventory:server:giveitem' removed (was CRIT-01).
